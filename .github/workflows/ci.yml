@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: compile all Python
+        run: python -m compileall -q serve train eval tools
+      - name: pure-python evaluators smoke test
+        run: |
+          python - <<'PY'
+          import json, random, subprocess, sys
+          random.seed(0)
+          with open("dump.jsonl", "w") as f:
+              for q in range(20):
+                  gold = random.sample(range(100), 2)
+                  f.write(json.dumps({"question": f"q{q}", "model": "m", "scores": {str(i): (0.9 if i in gold else random.random() * 0.5) for i in range(100)}, "gold": gold}) + "\n")
+          for cmd in (["python", "eval/calib-eval.py", "--member", "m=dump.jsonl"], ["python", "eval/selective-eval.py", "--member", "m=dump.jsonl"]):
+              out = subprocess.run(cmd, capture_output=True, text=True); print(out.stdout[-300:]); assert out.returncode == 0, out.stderr[-500:]
+          PY
