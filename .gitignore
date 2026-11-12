@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.safetensors
+*.gguf
+*.jsonl
+dumps*/
+logs/
+.env*
+*.rtf
+.DS_Store

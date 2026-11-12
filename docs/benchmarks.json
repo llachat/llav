@@ -1,0 +1,180 @@
+{
+  "updated": "2026-11-12",
+  "note": "All numbers measured by us on the same candidate sets / same SAG2 pipeline, same day. Judge-level = per-question ranking of the 100 BM25 candidates (AUC / R@10 / AllGold@10). End-to-end = SAG2 three-round retrieval, Recall@10 of gold passages, 50 questions per dataset. llav runs locally on one Apple M5 Max with a 5-model ensemble (latency not representative of the cloud API).",
+  "models": {
+    "llav": {
+      "label": "llav v0.4",
+      "open": true,
+      "params": "4B",
+      "price_per_1k_decisions_usd": 0,
+      "multimodal": false,
+      "finetunable": true,
+      "self_host": true
+    },
+    "jev": {
+      "label": "Jev 1.14",
+      "open": false,
+      "params": "undisclosed",
+      "price_per_1k_decisions_usd": null,
+      "multimodal": true,
+      "finetunable": false,
+      "self_host": false
+    },
+    "gemini": {
+      "label": "Gemini Decision 1",
+      "open": false,
+      "params": "undisclosed",
+      "price_per_1k_decisions_usd": null,
+      "multimodal": true,
+      "finetunable": false,
+      "self_host": false
+    }
+  },
+  "judge": {
+    "dev_q0_50": {
+      "llav": [
+        0.968,
+        0.911,
+        0.837
+      ],
+      "jev": [
+        0.967,
+        0.892,
+        0.779
+      ],
+      "gemini": [
+        0.941,
+        0.845,
+        0.721
+      ]
+    },
+    "heldout_q50_200": {
+      "llav": [
+        0.97,
+        0.919,
+        0.864
+      ],
+      "jev": [
+        0.969,
+        0.924,
+        0.864
+      ],
+      "gemini": [
+        0.966,
+        0.879,
+        0.779
+      ]
+    },
+    "final_q200_350": {
+      "llav": [
+        0.984,
+        0.945,
+        0.872
+      ],
+      "jev": [
+        0.983,
+        0.951,
+        0.899
+      ],
+      "gemini": [
+        0.981,
+        0.933,
+        0.859
+      ]
+    },
+    "final_q200_350_ensemble": {
+      "llav": [
+        0.984,
+        0.949,
+        0.893
+      ]
+    },
+    "metrics": [
+      "AUC",
+      "R@10",
+      "AllGold@10"
+    ]
+  },
+  "e2e_recall10": {
+    "musique": {
+      "llav": 0.812,
+      "jev": 0.933,
+      "gemini": 0.895
+    },
+    "2wiki": {
+      "llav": 0.975,
+      "jev": 0.975,
+      "gemini": 0.975
+    },
+    "hotpotqa": {
+      "llav": 0.99,
+      "jev": 1.0,
+      "gemini": 0.99
+    }
+  },
+  "e2e_latency_s_per_question": {
+    "musique": {
+      "llav_local_5_models": 75,
+      "jev": 2.2,
+      "gemini": 7.7
+    }
+  },
+  "calibration_heldout": {
+    "brier": {
+      "llav": 0.046,
+      "jev": 0.013
+    },
+    "ece": {
+      "llav": 0.109,
+      "jev": 0.023
+    }
+  },
+  "evidence_rounds_auc_hop1_hop2": {
+    "llav": [
+      0.976,
+      0.979
+    ],
+    "jev": [
+      0.987,
+      0.988
+    ]
+  },
+  "capabilities": {
+    "rows": [
+      "Open weights (Apache-2.0)",
+      "Self-host on one GPU / Apple silicon",
+      "Fine-tune on your outcomes",
+      "System One-compatible API",
+      "Image input",
+      "Audio input",
+      "Free tier"
+    ],
+    "llav": [
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      "20,000 decisions/day per key"
+    ],
+    "jev": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      "paid (via OpenRouter)"
+    ],
+    "gemini": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      "10,000 decisions/day"
+    ]
+  }
+}
