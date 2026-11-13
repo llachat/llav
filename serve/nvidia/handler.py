@@ -6,7 +6,13 @@ returns:   {"model": "llav-0.4", "answers": {qid: {"type":"noul","noul":..,"prob
 Single fused judge (this repo's weights) used for every round; evidence in `previously_retrieved_evidence` is rendered in the
 v1 format the model was trained with. Runs on a 16 GB T4 in fp16 (≈8.5 GB weights) or any larger GPU in bf16.
 """
-import json, os, time
+import json, math, os, time
+CALIB = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "calib-llav-0.4.json"))) if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "calib-llav-0.4.json")) else None
+def _platt(p, ab):
+    p = min(max(p, 1e-6), 1 - 1e-6); return 1 / (1 + math.exp(-(ab[0] * math.log(p / (1 - p)) + ab[1])))
+def calibrate(probs, has_evidence):
+    if not CALIB: return probs
+    ab = CALIB.get("rounds" if has_evidence else "round0"); return [_platt(p, ab) for p in probs] if ab else probs
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -86,6 +92,7 @@ class EndpointHandler:
             else:
                 docs.append(str(ins) if not isinstance(ins, dict) else json.dumps(ins, ensure_ascii=False))
         probs = self._score(self._query(st), docs) if docs else []
+        probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")))
         ranks = ranknorm(probs) if probs else []
-        answers = {qid: {"type": "noul", "noul": float(ranks[i] if noul_mode == "rank" else probs[i]), "prob": float(probs[i]), "rank_score": float(ranks[i])} for i, qid in enumerate(ids)}
+        answers = {qid: {"type": "noul", "noul": float(ranks[i] if noul_mode == "rank" else probs[i]), "prob": float(probs[i]), "prob_raw": float(probs_raw[i]), "calibrated": CALIB is not None, "rank_score": float(ranks[i])} for i, qid in enumerate(ids)}
         return {"model": "llav-0.4", "answers": answers, "usage": {"input_tokens": 0, "output_tokens": 0}, "latency_ms": int((time.time() - t0) * 1000)}

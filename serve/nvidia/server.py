@@ -7,6 +7,14 @@ Env: LLAV_ROUND0 (HF repo or dir), LLAV_ROUNDS, LLAV_INTERNAL_SECRET (required h
      LLAV_MAX_LEN (2048), LLAV_NOUL (rank|prob). Health: GET /health. Port 8000.
 """
 import json, os, time, hmac
+import math as _m
+CALIB = json.load(open(os.environ["LLAV_CALIB"])) if os.environ.get("LLAV_CALIB") and os.path.exists(os.environ["LLAV_CALIB"]) else None
+def _platt(p, ab):
+    p = min(max(p, 1e-6), 1 - 1e-6); z = ab[0] * _m.log(p / (1 - p)) + ab[1]; return 1 / (1 + _m.exp(-z))
+def calibrate(probs, has_evidence):
+    if not CALIB: return probs
+    ab = CALIB.get("rounds" if has_evidence else "round0") or CALIB.get("platt")
+    return [_platt(p, ab) for p in probs] if ab else probs
 import torch
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -107,8 +115,9 @@ async def systemone(request: Request):
             docs.append(str(ins) if not isinstance(ins, dict) else json.dumps(ins, ensure_ascii=False))
     judge = rounds if st.get("previously_retrieved_evidence") else round0
     probs = judge.score(build_query(st, judge.style), docs) if docs else []
+    probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")))
     ranks = ranknorm(probs) if probs else []
-    answers = {qid: {"type": "noul", "noul": float(ranks[i] if NOUL == "rank" else probs[i]), "prob": float(probs[i]), "rank_score": float(ranks[i])} for i, qid in enumerate(ids)}
+    answers = {qid: {"type": "noul", "noul": float(ranks[i] if NOUL == "rank" else probs[i]), "prob": float(probs[i]), "prob_raw": float(probs_raw[i]), "calibrated": CALIB is not None, "rank_score": float(ranks[i])} for i, qid in enumerate(ids)}
     return {"model": "llav-0.4", "answers": answers, "usage": {"input_tokens": 0, "output_tokens": 0}, "latency_ms": int((time.time() - t0) * 1000)}
 
 

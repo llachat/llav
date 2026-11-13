@@ -28,9 +28,18 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--members", required=True); ap.add_argument("--prefilter", default=""); ap.add_argument("--keep", type=int, default=30)
 ap.add_argument("--port", type=int, default=8020); ap.add_argument("--host", default="127.0.0.1"); ap.add_argument("--batch", type=int, default=8); ap.add_argument("--max-len", type=int, default=2048)
 ap.add_argument("--noul", default="rank", choices=["rank","prob"], help="what the noul field carries: rank = request-relative rank-normalised ensemble score (what SAG2 was validated with); prob = weighted mean of member probabilities"); ap.add_argument("--round0", default=""); ap.add_argument("--rounds", default="")
-ap.add_argument("--name", default="llav-0.3"); ap.add_argument("--evidence-chars", type=int, default=300); ap.add_argument("--evidence-style", default="v1", choices=["v1","v4"]); ap.add_argument("--log", default=os.path.expanduser("~/llav/logs/llav-serve2-requests.jsonl"))
+ap.add_argument("--calib", default="", help="JSON with Platt params {\"round0\":[a,b],\"rounds\":[a,b]}: prob -> sigmoid(a*logit(prob)+b); raw kept in prob_raw"); ap.add_argument("--name", default="llav-0.3"); ap.add_argument("--evidence-chars", type=int, default=300); ap.add_argument("--evidence-style", default="v1", choices=["v1","v4"]); ap.add_argument("--log", default=os.path.expanduser("~/llav/logs/llav-serve2-requests.jsonl"))
 ap.add_argument("--instruct", default="Given a multi-hop question, judge whether the passage states a fact that is necessary to answer it (including a fact that identifies an intermediate entity in the answer chain).")
 a = ap.parse_args()
+import math as _m
+CALIB = json.load(open(os.path.expanduser(a.calib))) if a.calib else None
+def _platt(p, ab):
+    p = min(max(p, 1e-6), 1 - 1e-6); z = ab[0] * _m.log(p / (1 - p)) + ab[1]; return 1 / (1 + _m.exp(-z))
+def calibrate(probs, has_evidence):
+    if not CALIB: return probs
+    ab = CALIB.get("rounds" if has_evidence else "round0") or CALIB.get("platt")
+    return [_platt(p, ab) for p in probs] if ab else probs
+
 try: mx.set_cache_limit(2 << 30)
 except Exception: pass
 DEFAULT_SYSTEM = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\"."
@@ -169,7 +178,8 @@ async def systemone(request: Request):
         else:
             for i in range(n): final[i] = kept.get(i, 0.0)
     if not n: probs = []
-    answers = {qid: {"type": "noul", "noul": float(min(max(final[i] if a.noul == "rank" else probs[i], 0.0), 1.0)), "rank_score": float(min(max(final[i], 0.0), 1.0)), "prob": float(min(max(probs[i], 0.0), 1.0))} for i, qid in enumerate(ids)}
+    probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")))
+    answers = {qid: {"type": "noul", "noul": float(min(max(final[i] if a.noul == "rank" else probs[i], 0.0), 1.0)), "rank_score": float(min(max(final[i], 0.0), 1.0)), "prob_raw": float(min(max(probs_raw[i], 0.0), 1.0)), "calibrated": CALIB is not None, "prob": float(min(max(probs[i], 0.0), 1.0))} for i, qid in enumerate(ids)}
     out = {"model": a.name, "answers": answers, "usage": {"input_tokens": 0, "output_tokens": 0}, "latency_ms": int((time.time() - t0) * 1000)}
     try:
         with open(a.log, "a") as f:
