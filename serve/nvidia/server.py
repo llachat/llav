@@ -11,10 +11,17 @@ import math as _m
 CALIB = json.load(open(os.environ["LLAV_CALIB"])) if os.environ.get("LLAV_CALIB") and os.path.exists(os.environ["LLAV_CALIB"]) else None
 def _platt(p, ab):
     p = min(max(p, 1e-6), 1 - 1e-6); z = ab[0] * _m.log(p / (1 - p)) + ab[1]; return 1 / (1 + _m.exp(-z))
-def calibrate(probs, has_evidence):
+def calibrate(probs, has_evidence, kinds=None):
+    """Platt per question type: retrieval candidates use round0/rounds params (fitted on SAG2, ~2% positives); free-form
+    questions use CALIB['general'] if present, else stay raw (the SAG2 shift would wrongly push them down)."""
     if not CALIB: return probs
-    ab = CALIB.get("rounds" if has_evidence else "round0") or CALIB.get("platt")
-    return [_platt(p, ab) for p in probs] if ab else probs
+    ab_r = CALIB.get("rounds" if has_evidence else "round0") or CALIB.get("platt"); ab_g = CALIB.get("general")
+    out = []
+    for i, p in enumerate(probs):
+        k = kinds[i] if kinds else "retrieval"
+        ab = ab_r if k == "retrieval" else ab_g
+        out.append(_platt(p, ab) if ab else p)
+    return out
 import torch
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -26,6 +33,7 @@ DEV = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_a
 DTYPE = torch.bfloat16 if DEV == "cuda" else torch.float16 if DEV == "mps" else torch.float32
 SYSTEM = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\"."
 INSTRUCT = "Given a multi-hop question, judge whether the passage states a fact that is necessary to answer it (including a fact that identifies an intermediate entity in the answer chain)."
+MODEL_NAME = os.environ.get("LLAV_MODEL_NAME", "llav-0.4")
 GENERAL_INSTRUCT = os.environ.get("LLAV_GENERAL_INSTRUCT", "Given a yes/no question about the Document, judge whether the correct answer is yes.")
 SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
@@ -109,7 +117,7 @@ def _score_locked(judge, items):
 @app.get("/health")
 async def health(request: Request):
     if not authed(request): return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return {"status": "ok", "model": "llav-0.4", "device": DEV, "round0": os.environ.get("LLAV_ROUND0"), "rounds": os.environ.get("LLAV_ROUNDS")}
+    return {"status": "ok", "model": MODEL_NAME, "device": DEV, "round0": os.environ.get("LLAV_ROUND0"), "rounds": os.environ.get("LLAV_ROUNDS")}
 
 
 @app.post("/v1/systemone")
@@ -133,10 +141,11 @@ async def systemone(request: Request):
             qtxt = ins if isinstance(ins, str) else (ins.get("question") if isinstance(ins, dict) and ins.get("question") else json.dumps(ins, ensure_ascii=False))
             items.append((str(qtxt)[:2000], state_text[:6000], GENERAL_INSTRUCT))
     probs = (await asyncio.to_thread(_score_locked, judge, items)) if items else []
-    probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")))
+    kinds = ["retrieval" if it[2] == INSTRUCT else "general" for it in items]
+    probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")), kinds)
     ranks = ranknorm(probs) if probs else []
     answers = {qid: {"type": "noul", "noul": float(ranks[i] if NOUL == "rank" else probs[i]), "prob": float(probs[i]), "prob_raw": float(probs_raw[i]), "calibrated": CALIB is not None, "rank_score": float(ranks[i])} for i, qid in enumerate(ids)}
-    return {"model": "llav-0.4", "answers": answers, "usage": {"input_tokens": 0, "output_tokens": 0}, "latency_ms": int((time.time() - t0) * 1000)}
+    return {"model": MODEL_NAME, "answers": answers, "usage": {"input_tokens": 0, "output_tokens": 0}, "latency_ms": int((time.time() - t0) * 1000)}
 
 
 if __name__ == "__main__":
