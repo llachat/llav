@@ -16,7 +16,7 @@ Member spec: "name=/path/to/model[|adapter=/path][|w=3][|system=...]"   (semicol
 run: ~/rerank-venv/bin/python ~/llav/llav-serve2.py --members "ft4b=/…/fused|w=3;qwen4b=/…/qwen3-reranker-4b;prism=/…/prism-0.8b|system=Judge whether the Document meets the requirements based on the Query and the Instruct provided. ;qwen06=/…/qwen3-reranker-0.6b" \
        --prefilter qwen06 --keep 30 --port 8020
 """
-import argparse, json, os, time
+import argparse, json, os, time, hmac
 import mlx.core as mx
 import mlx_lm.utils as _U; _U.MODEL_REMAPPING["qwen3_5_text"] = "qwen3_5"
 from mlx_lm.utils import load
@@ -28,7 +28,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--members", required=True); ap.add_argument("--prefilter", default=""); ap.add_argument("--keep", type=int, default=30)
 ap.add_argument("--port", type=int, default=8020); ap.add_argument("--host", default="127.0.0.1"); ap.add_argument("--batch", type=int, default=8); ap.add_argument("--max-len", type=int, default=2048)
 ap.add_argument("--noul", default="rank", choices=["rank","prob"], help="what the noul field carries: rank = request-relative rank-normalised ensemble score (what SAG2 was validated with); prob = weighted mean of member probabilities"); ap.add_argument("--round0", default=""); ap.add_argument("--rounds", default="")
-ap.add_argument("--calib", default="", help="JSON with Platt params {\"round0\":[a,b],\"rounds\":[a,b]}: prob -> sigmoid(a*logit(prob)+b); raw kept in prob_raw"); ap.add_argument("--name", default="llav-0.3"); ap.add_argument("--evidence-chars", type=int, default=300); ap.add_argument("--evidence-style", default="v1", choices=["v1","v4"]); ap.add_argument("--log", default=os.path.expanduser("~/llav/logs/llav-serve2-requests.jsonl"))
+ap.add_argument("--prob-member", default="", help="member whose probability feeds the prob field (e.g. soupC); default = weighted mean of member probabilities"); ap.add_argument("--calib", default="", help="JSON with Platt params {\"round0\":[a,b],\"rounds\":[a,b]}: prob -> sigmoid(a*logit(prob)+b); raw kept in prob_raw"); ap.add_argument("--name", default="llav-0.3"); ap.add_argument("--evidence-chars", type=int, default=300); ap.add_argument("--evidence-style", default="v1", choices=["v1","v4"]); ap.add_argument("--log", default=os.path.expanduser("~/llav/logs/llav-serve2-requests.jsonl"))
 ap.add_argument("--instruct", default="Given a multi-hop question, judge whether the passage states a fact that is necessary to answer it (including a fact that identifies an intermediate entity in the answer chain).")
 a = ap.parse_args()
 import math as _m
@@ -127,10 +127,13 @@ async def health(): return {"status": "ok", "model": a.name, "round0": [(m.name,
 async def models(): return {"data": [{"id": a.name, "object": "model"}]}
 
 
+INTERNAL_SECRET = os.environ.get("LLAV_INTERNAL_SECRET", "")
 @app.post("/v1/systemone")
 @app.post("/systemone")
 @app.post("/decisions")
 async def systemone(request: Request):
+    if INTERNAL_SECRET and not hmac.compare_digest(request.headers.get("X-Llav-Internal", ""), INTERNAL_SECRET):
+        from fastapi.responses import JSONResponse as _JR; return _JR({"error": "unauthorized"}, status_code=401)
     body = await request.json(); t0 = time.time()
     state = body.get("state")
     if isinstance(state, str) and state.lstrip().startswith("{"):
@@ -178,6 +181,8 @@ async def systemone(request: Request):
         else:
             for i in range(n): final[i] = kept.get(i, 0.0)
     if not n: probs = []
+    if a.prob_member and a.prob_member in detail and isinstance(detail[a.prob_member], dict):
+        pm = detail[a.prob_member]; probs = [float(pm.get(i, probs[i])) for i in range(len(probs))]
     probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")))
     answers = {qid: {"type": "noul", "noul": float(min(max(final[i] if a.noul == "rank" else probs[i], 0.0), 1.0)), "rank_score": float(min(max(final[i], 0.0), 1.0)), "prob_raw": float(min(max(probs_raw[i], 0.0), 1.0)), "calibrated": CALIB is not None, "prob": float(min(max(probs[i], 0.0), 1.0))} for i, qid in enumerate(ids)}
     out = {"model": a.name, "answers": answers, "usage": {"input_tokens": 0, "output_tokens": 0}, "latency_ms": int((time.time() - t0) * 1000)}

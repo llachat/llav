@@ -1,14 +1,14 @@
 {
- "model": "llav-0.4 soupC (Qwen3-Reranker-4B)",
- "fitted_on": "SAG2 MuSiQue q0-50 (round0: 100 BM25 candidates; rounds: Jev top-30 hop2)",
- "evaluated_on": "q50-200 held-out",
+ "model": "llav-0.4 served: round0 prob = soupC member probability (noul stays the rank ensemble); evidence rounds = v4@1250 (v4 style)",
+ "fitted_on": "SAG2 MuSiQue q0-50",
+ "evaluated_on": "q50-200 held-out (round0: Brier 0.0095 / ECE 0.004 vs Jev 0.0113 / 0.015; rounds: Brier 0.037 / ECE 0.009 vs Jev 0.037 / 0.023)",
  "round0": [
   1.228619971226088,
   -2.182384017439978
  ],
  "rounds": [
-  0.961063260905509,
-  -2.6094007838495776
+  0.9181294533443525,
+  -1.719324675049022
  ],
  "method": "Platt: p' = sigmoid(a*logit(p)+b)"
 }

@@ -7,7 +7,7 @@ Reports AUC, P@10, R@10, AllGold@10, MRR of the first gold, mean latency; append
 """
 import argparse, json, os, statistics as st, time, urllib.request
 ap = argparse.ArgumentParser()
-ap.add_argument("--details", required=True); ap.add_argument("--proxy", default="http://127.0.0.1:8001"); ap.add_argument("--model", required=True)
+ap.add_argument("--field", default="noul", choices=["noul","prob","prob_raw"], help="which answer field to score/dump (prob_raw = backend probability before calibration)"); ap.add_argument("--details", required=True); ap.add_argument("--proxy", default="http://127.0.0.1:8001"); ap.add_argument("--model", required=True)
 ap.add_argument("--limit", type=int, default=0); ap.add_argument("--tag", default=""); ap.add_argument("--id-shift", type=int, default=0, help="SAG2 trace ids are 1-based chunk rowids; -1 maps them to exact corpus indices (default 0 keeps the historical candidate sets)"); ap.add_argument("--dump", default="", help="write per-question candidate scores as JSONL"); ap.add_argument("--concurrency", type=int, default=2)
 ap.add_argument("--decomp", default="", help="oracle = gold MuSiQue decomposition; or a JSON file {question: [sub-questions]}")
 ap.add_argument("--order", default="bm25", choices=["bm25","shuffle","reverse","byid"], help="candidate order inside the request (tests position bias of the judge)")
@@ -50,7 +50,7 @@ def one(row):
     t0 = time.time()
     d = json.load(urllib.request.urlopen(urllib.request.Request(a.proxy + "/v1/systemone", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}), timeout=1800))
     lat = time.time() - t0
-    sc = {int(k.split("_")[-1]): (v.get("noul") if isinstance(v, dict) else None) for k, v in d.get("answers", {}).items()}
+    sc = {int(k.split("_")[-1]): (v.get(a.field, v.get("noul")) if isinstance(v, dict) else None) for k, v in d.get("answers", {}).items()}
     sc = {k: (v if v is not None else 0.0) for k, v in sc.items()}
     ranked = sorted(sc, key=lambda k: -sc[k])
     if a.dump:
