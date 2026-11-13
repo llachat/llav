@@ -28,9 +28,10 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--members", required=True); ap.add_argument("--prefilter", default=""); ap.add_argument("--keep", type=int, default=30)
 ap.add_argument("--port", type=int, default=8020); ap.add_argument("--host", default="127.0.0.1"); ap.add_argument("--batch", type=int, default=8); ap.add_argument("--max-len", type=int, default=2048)
 ap.add_argument("--noul", default="rank", choices=["rank","prob"], help="what the noul field carries: rank = request-relative rank-normalised ensemble score (what SAG2 was validated with); prob = weighted mean of member probabilities"); ap.add_argument("--round0", default=""); ap.add_argument("--rounds", default="")
-ap.add_argument("--prob-member", default="", help="member whose probability feeds the prob field (e.g. soupC); default = weighted mean of member probabilities"); ap.add_argument("--calib", default="", help="JSON with Platt params {\"round0\":[a,b],\"rounds\":[a,b]}: prob -> sigmoid(a*logit(prob)+b); raw kept in prob_raw"); ap.add_argument("--name", default="llav-0.3"); ap.add_argument("--evidence-chars", type=int, default=300); ap.add_argument("--evidence-style", default="v1", choices=["v1","v4"]); ap.add_argument("--log", default=os.path.expanduser("~/llav/logs/llav-serve2-requests.jsonl"))
+ap.add_argument("--general-instruct", default="Given a yes/no question about the Document, judge whether the correct answer is yes.", help="instruct used when a question is free-form text (not a retrieval candidate): Query = the question, Document = the state"); ap.add_argument("--prob-member", default="", help="member whose probability feeds the prob field (e.g. soupC); default = weighted mean of member probabilities"); ap.add_argument("--calib", default="", help="JSON with Platt params {\"round0\":[a,b],\"rounds\":[a,b]}: prob -> sigmoid(a*logit(prob)+b); raw kept in prob_raw"); ap.add_argument("--name", default="llav-0.3"); ap.add_argument("--evidence-chars", type=int, default=300); ap.add_argument("--evidence-style", default="v1", choices=["v1","v4"]); ap.add_argument("--log", default=os.path.expanduser("~/llav/logs/llav-serve2-requests.jsonl"))
 ap.add_argument("--instruct", default="Given a multi-hop question, judge whether the passage states a fact that is necessary to answer it (including a fact that identifies an intermediate entity in the answer chain).")
 a = ap.parse_args()
+GENERAL = a.general_instruct
 import math as _m
 CALIB = json.load(open(os.path.expanduser(a.calib))) if a.calib else None
 def _platt(p, ab):
@@ -64,13 +65,13 @@ class Member:
         self.prefix = "<|im_start|>system\n" + self.system + "<|im_end|>\n<|im_start|>user\n"
         print(f"loaded member {self.name} w={self.w} style={self.style} ({self.path}{' + ' + self.adapter if self.adapter else ''})", flush=True)
 
-    def enc(self, query, doc):
-        ids = self.tok.encode(self.prefix + f"<Instruct>: {a.instruct}\n<Query>: {query}\n<Document>: {doc}" + SUFFIX, add_special_tokens=False)
+    def enc(self, query, doc, instruct=None):
+        ids = self.tok.encode(self.prefix + f"<Instruct>: {instruct or a.instruct}\n<Query>: {query}\n<Document>: {doc}" + SUFFIX, add_special_tokens=False)
         if len(ids) >= a.max_len: ids = ids[: a.max_len - 40] + ids[-39:]
         return ids
 
     def score(self, pairs):
-        out = []; seqs = [self.enc(q, d) for q, d in pairs]
+        out = []; seqs = [self.enc(*pr) for pr in pairs]
         for i in range(0, len(seqs), a.batch):
             chunk = seqs[i:i + a.batch]; L = max(len(s) for s in chunk)
             arr = mx.array([s + [0] * (L - len(s)) for s in chunk]); last = mx.array([len(s) - 1 for s in chunk])
@@ -149,10 +150,17 @@ async def systemone(request: Request):
             docs.append(f"{title}\n{ins.get('candidate_passage', '')}")
         else:
             docs.append(str(state)[:6000])
+    # free-form questions (no candidate passage): the question text becomes the Query, the state the Document, under the general instruct
+    gen_q = [None] * len(ids)
+    for j, qid in enumerate(ids):
+        ins = qs[qid].get("instructions")
+        if not (isinstance(ins, dict) and ("candidate_passage" in ins or "candidate_title" in ins)):
+            txt = ins if isinstance(ins, str) else (ins.get("question") if isinstance(ins, dict) and ins.get("question") else json.dumps(ins, ensure_ascii=False))
+            gen_q[j] = str(txt)[:2000]
     qcache = {}
     def pairs_for(m):
         if m.style not in qcache: qcache[m.style] = build_query(st, m.style)
-        return [(qcache[m.style], d) for d in docs]
+        return [((gen_q[j], d, GENERAL) if gen_q[j] is not None else (qcache[m.style], d)) for j, d in enumerate(docs)]
     pairs = docs
     n = len(pairs); final = [0.0] * n; detail = {}
     if n:
