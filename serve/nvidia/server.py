@@ -26,6 +26,7 @@ DEV = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_a
 DTYPE = torch.bfloat16 if DEV == "cuda" else torch.float16 if DEV == "mps" else torch.float32
 SYSTEM = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\"."
 INSTRUCT = "Given a multi-hop question, judge whether the passage states a fact that is necessary to answer it (including a fact that identifies an intermediate entity in the answer chain)."
+GENERAL_INSTRUCT = os.environ.get("LLAV_GENERAL_INSTRUCT", "Given a yes/no question about the Document, judge whether the correct answer is yes.")
 SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
@@ -38,14 +39,15 @@ class Judge:
         self.prefix = "<|im_start|>system\n" + SYSTEM + "<|im_end|>\n<|im_start|>user\n"
         print(f"loaded {path} style={style} on {DEV} {DTYPE}", flush=True)
 
-    def enc(self, query: str, doc: str):
-        ids = self.tok.encode(self.prefix + f"<Instruct>: {INSTRUCT}\n<Query>: {query}\n<Document>: {doc}" + SUFFIX, add_special_tokens=False)
+    def enc(self, query: str, doc: str, instruct: str = INSTRUCT):
+        ids = self.tok.encode(self.prefix + f"<Instruct>: {instruct}\n<Query>: {query}\n<Document>: {doc}" + SUFFIX, add_special_tokens=False)
         if len(ids) >= MAX_LEN: ids = ids[: MAX_LEN - 40] + ids[-39:]
         return ids
 
     @torch.inference_mode()
-    def score(self, query: str, docs: list[str]) -> list[float]:
-        seqs = [self.enc(query, d) for d in docs]; out: list[float] = []
+    def score(self, query: str, docs: list[str], items=None) -> list[float]:
+        """items: optional (query, doc, instruct) triples overriding (query, docs) — free-form questions use the general instruct."""
+        seqs = [self.enc(*it) for it in items] if items is not None else [self.enc(query, d) for d in docs]; out: list[float] = []
         order = sorted(range(len(seqs)), key=lambda i: len(seqs[i]))   # length-sorted batches: less padding
         res = [0.0] * len(seqs)
         for s in range(0, len(order), BATCH):
@@ -105,16 +107,17 @@ async def systemone(request: Request):
         except Exception: pass
     st = state if isinstance(state, dict) else {"original_question": str(state)}
     qs = body.get("questions") or {}; ids = list(qs)[:1000]
-    docs = []
+    judge = rounds if st.get("previously_retrieved_evidence") else round0
+    q0 = build_query(st, judge.style); state_text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False); items = []
     for qid in ids:
         ins = (qs[qid] or {}).get("instructions")
         if isinstance(ins, dict) and ("candidate_passage" in ins or "candidate_title" in ins):
             title = " / ".join(str(x) for x in (ins.get("candidate_title"), ins.get("candidate_heading")) if x)
-            docs.append(f"{title}\n{ins.get('candidate_passage', '')}")
-        else:
-            docs.append(str(ins) if not isinstance(ins, dict) else json.dumps(ins, ensure_ascii=False))
-    judge = rounds if st.get("previously_retrieved_evidence") else round0
-    probs = judge.score(build_query(st, judge.style), docs) if docs else []
+            items.append((q0, f"{title}\n{ins.get('candidate_passage', '')}", INSTRUCT))
+        else:  # free-form yes/no question: Query = the question, Document = the state
+            qtxt = ins if isinstance(ins, str) else (ins.get("question") if isinstance(ins, dict) and ins.get("question") else json.dumps(ins, ensure_ascii=False))
+            items.append((str(qtxt)[:2000], state_text[:6000], GENERAL_INSTRUCT))
+    probs = judge.score("", [], items) if items else []
     probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")))
     ranks = ranknorm(probs) if probs else []
     answers = {qid: {"type": "noul", "noul": float(ranks[i] if NOUL == "rank" else probs[i]), "prob": float(probs[i]), "prob_raw": float(probs_raw[i]), "calibrated": CALIB is not None, "rank_score": float(ranks[i])} for i, qid in enumerate(ids)}

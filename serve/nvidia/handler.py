@@ -18,6 +18,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 SYSTEM = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\"."
 INSTRUCT = "Given a multi-hop question, judge whether the passage states a fact that is necessary to answer it (including a fact that identifies an intermediate entity in the answer chain)."
+GENERAL_INSTRUCT = os.environ.get("LLAV_GENERAL_INSTRUCT", "Given a yes/no question about the Document, judge whether the correct answer is yes.")
 SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
@@ -51,14 +52,15 @@ class EndpointHandler:
             q += "\nAlready retrieved evidence (context only): " + " || ".join(parts)
         return q
 
-    def _enc(self, query: str, doc: str):
-        ids = self.tok.encode(self.prefix + f"<Instruct>: {INSTRUCT}\n<Query>: {query}\n<Document>: {doc}" + SUFFIX, add_special_tokens=False)
+    def _enc(self, query: str, doc: str, instruct: str = INSTRUCT):
+        ids = self.tok.encode(self.prefix + f"<Instruct>: {instruct}\n<Query>: {query}\n<Document>: {doc}" + SUFFIX, add_special_tokens=False)
         if len(ids) >= self.max_len: ids = ids[: self.max_len - 40] + ids[-39:]
         return ids
 
     @torch.inference_mode()
-    def _score(self, query: str, docs: list) -> list:
-        seqs = [self._enc(query, d) for d in docs]; res = [0.0] * len(seqs)
+    def _score(self, query: str, docs: list, items=None) -> list:
+        """items: optional list of (query, doc, instruct) triples overriding (query, docs) — used for free-form questions."""
+        seqs = [self._enc(*it) for it in items] if items is not None else [self._enc(query, d) for d in docs]; res = [0.0] * len(seqs)
         order = sorted(range(len(seqs)), key=lambda i: len(seqs[i]))
         pad = self.tok.pad_token_id or 0
         for s in range(0, len(order), self.batch):
@@ -83,15 +85,17 @@ class EndpointHandler:
             try: state = json.loads(state)
             except Exception: pass
         st = state if isinstance(state, dict) else {"original_question": str(state)}
-        qs = body.get("questions") or {}; ids = list(qs)[:1000]; docs = []
+        qs = body.get("questions") or {}; ids = list(qs)[:1000]; items = []; q0 = self._query(st)
+        state_text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
         for qid in ids:
             ins = (qs[qid] or {}).get("instructions") if isinstance(qs[qid], dict) else None
             if isinstance(ins, dict) and ("candidate_passage" in ins or "candidate_title" in ins):
                 title = " / ".join(str(x) for x in (ins.get("candidate_title"), ins.get("candidate_heading")) if x)
-                docs.append(f"{title}\n{ins.get('candidate_passage', '')}")
-            else:
-                docs.append(str(ins) if not isinstance(ins, dict) else json.dumps(ins, ensure_ascii=False))
-        probs = self._score(self._query(st), docs) if docs else []
+                items.append((q0, f"{title}\n{ins.get('candidate_passage', '')}", INSTRUCT))
+            else:  # free-form yes/no question: Query = the question, Document = the state
+                qtxt = ins if isinstance(ins, str) else (ins.get("question") if isinstance(ins, dict) and ins.get("question") else json.dumps(ins, ensure_ascii=False))
+                items.append((str(qtxt)[:2000], state_text[:6000], GENERAL_INSTRUCT))
+        probs = self._score("", [], items) if items else []
         probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")))
         ranks = ranknorm(probs) if probs else []
         answers = {qid: {"type": "noul", "noul": float(ranks[i] if noul_mode == "rank" else probs[i]), "prob": float(probs[i]), "prob_raw": float(probs_raw[i]), "calibrated": CALIB is not None, "rank_score": float(ranks[i])} for i, qid in enumerate(ids)}
