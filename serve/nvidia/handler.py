@@ -67,7 +67,7 @@ class EndpointHandler:
             idx = order[s:s + self.batch]; chunk = [seqs[i] for i in idx]; L = max(len(x) for x in chunk)
             input_ids = torch.tensor([[pad] * (L - len(x)) + x for x in chunk], device=self.dev)
             attn = torch.tensor([[0] * (L - len(x)) + [1] * len(x) for x in chunk], device=self.dev)
-            logits = self.model(input_ids=input_ids, attention_mask=attn, use_cache=False).logits[:, -1, :]
+            logits = self.model(input_ids=input_ids, attention_mask=attn, use_cache=False, logits_to_keep=1).logits[:, -1, :]
             p = torch.softmax(torch.stack([logits[:, self.NO], logits[:, self.YES]], dim=1).float(), dim=1)[:, 1].tolist()
             for i, v in zip(idx, p): res[i] = v
         return res

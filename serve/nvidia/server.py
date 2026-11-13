@@ -6,7 +6,7 @@ Scores = P(yes) from the yes/no logits at the last position (Qwen3-Reranker head
 Env: LLAV_ROUND0 (HF repo or dir), LLAV_ROUNDS, LLAV_INTERNAL_SECRET (required header X-Llav-Internal), LLAV_BATCH (16),
      LLAV_MAX_LEN (2048), LLAV_NOUL (rank|prob). Health: GET /health. Port 8000.
 """
-import json, os, time, hmac
+import json, os, time, hmac, asyncio, threading
 import math as _m
 CALIB = json.load(open(os.environ["LLAV_CALIB"])) if os.environ.get("LLAV_CALIB") and os.path.exists(os.environ["LLAV_CALIB"]) else None
 def _platt(p, ab):
@@ -34,7 +34,16 @@ class Judge:
     def __init__(self, path: str, style: str):
         self.style = style
         self.tok = AutoTokenizer.from_pretrained(path); self.tok.padding_side = "left"
-        self.model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=DTYPE).to(DEV).eval()
+        q = os.environ.get("LLAV_QUANT", "")   # "8bit" / "4bit": serve an 8B judge on a 12 GB card
+        if q:
+            from transformers import BitsAndBytesConfig
+            qc = BitsAndBytesConfig(load_in_8bit=True) if q == "8bit" else BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
+            self.model = AutoModelForCausalLM.from_pretrained(path, dtype=DTYPE, quantization_config=qc, device_map={"": 0}).eval()
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(path, dtype=DTYPE).to(DEV).eval()
+        if os.environ.get("LLAV_ADAPTER"):   # LoRA on top of a (quantised) base, no merge needed
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, os.environ["LLAV_ADAPTER"]).eval()
         self.YES = self.tok.encode("yes", add_special_tokens=False)[0]; self.NO = self.tok.encode("no", add_special_tokens=False)[0]
         self.prefix = "<|im_start|>system\n" + SYSTEM + "<|im_end|>\n<|im_start|>user\n"
         print(f"loaded {path} style={style} on {DEV} {DTYPE}", flush=True)
@@ -54,10 +63,11 @@ class Judge:
             idx = order[s:s + BATCH]; chunk = [seqs[i] for i in idx]; L = max(len(x) for x in chunk)
             input_ids = torch.tensor([[self.tok.pad_token_id or 0] * (L - len(x)) + x for x in chunk], device=DEV)
             attn = torch.tensor([[0] * (L - len(x)) + [1] * len(x) for x in chunk], device=DEV)
-            logits = self.model(input_ids=input_ids, attention_mask=attn, use_cache=False).logits[:, -1, :]
+            logits = self.model(input_ids=input_ids, attention_mask=attn, use_cache=False, logits_to_keep=1).logits[:, -1, :]
             two = torch.stack([logits[:, self.NO], logits[:, self.YES]], dim=1).float()
             p = torch.softmax(two, dim=1)[:, 1].tolist()
             for i, v in zip(idx, p): res[i] = v
+        if DEV == "cuda": torch.cuda.empty_cache()   # give memory back between requests (12 GB cards, Windows pages on overflow)
         return res
 
 
@@ -91,6 +101,11 @@ def authed(request: Request) -> bool:
     return bool(SECRET) and hmac.compare_digest(request.headers.get("X-Llav-Internal", ""), SECRET)
 
 
+GPU_LOCK = threading.Lock()   # one forward pass at a time on the card; the event loop stays free for health checks and queued requests
+def _score_locked(judge, items):
+    with GPU_LOCK:
+        return judge.score("", [], items)
+
 @app.get("/health")
 async def health(request: Request):
     if not authed(request): return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -117,7 +132,7 @@ async def systemone(request: Request):
         else:  # free-form yes/no question: Query = the question, Document = the state
             qtxt = ins if isinstance(ins, str) else (ins.get("question") if isinstance(ins, dict) and ins.get("question") else json.dumps(ins, ensure_ascii=False))
             items.append((str(qtxt)[:2000], state_text[:6000], GENERAL_INSTRUCT))
-    probs = judge.score("", [], items) if items else []
+    probs = (await asyncio.to_thread(_score_locked, judge, items)) if items else []
     probs_raw = list(probs); probs = calibrate(probs, bool(st.get("previously_retrieved_evidence")))
     ranks = ranknorm(probs) if probs else []
     answers = {qid: {"type": "noul", "noul": float(ranks[i] if NOUL == "rank" else probs[i]), "prob": float(probs[i]), "prob_raw": float(probs_raw[i]), "calibrated": CALIB is not None, "rank_score": float(ranks[i])} for i, qid in enumerate(ids)}
